@@ -47,7 +47,7 @@ func StartTestHelper() {
 	testHelper, err = helper.NewSoloTestHelper(func(defaults helper.TestConfig) helper.TestConfig {
 		defaults.RootDir = filepath.Join(cwd, "../../..")
 		defaults.HelmChartName = "gloo"
-		defaults.InstallNamespace = "gloo-system"
+		defaults.InstallNamespace = installNamespace
 		defaults.Verbose = true
 		return defaults
 	})

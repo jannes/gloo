@@ -27,6 +27,35 @@ type proxyReconciler struct {
 	baseReconciler gloov1.ProxyReconciler
 }
 
+func logGeneratedProxies(logger *zap.SugaredLogger, generatedProxies GeneratedProxies) {
+	for p, report := range generatedProxies {
+		logProxy(logger, p)
+		for resource, reports := range report {
+			logger.Errorf("    Resource: %s. Report: %v", resource.GetMetadata().GetName(), reports.Errors)
+		}
+	}
+}
+
+func logProxy(logger *zap.SugaredLogger, p *gloov1.Proxy) {
+	logger.Errorf("    Proxy: %s", p.GetMetadata().GetName())
+	for _, listener := range p.Listeners {
+		logVirtualHostsOnListener(logger, listener)
+	}
+	logger.Errorf("    ====== end proxy =======")
+}
+
+func logVirtualHostsOnListener(logger *zap.SugaredLogger, listener *gloov1.Listener) {
+	for _, vhost := range listener.GetHttpListener().GetVirtualHosts() {
+		logger.Errorf("    (Listener %s) VirtualHost: %s. domains: %v", listener.GetName(), vhost.GetName(), vhost.GetDomains())
+	}
+}
+
+func logVirtualHostsOnHttpListener(logger *zap.SugaredLogger, httpListener *gloov1.HttpListener) {
+	for _, vhost := range httpListener.GetVirtualHosts() {
+		logger.Errorf("    VirtualHost: %s. domains: %v", vhost.GetName(), vhost.GetDomains())
+	}
+}
+
 func NewProxyReconciler(proxyValidator validation.ProxyValidationServiceClient, proxyClient gloov1.ProxyClient) *proxyReconciler {
 	return &proxyReconciler{proxyValidator: proxyValidator, baseReconciler: gloov1.NewProxyReconciler(proxyClient)}
 }
@@ -34,17 +63,25 @@ func NewProxyReconciler(proxyValidator validation.ProxyValidationServiceClient, 
 const proxyValidationErrMsg = "internal err: communication with proxy validation (gloo) failed"
 
 func (s *proxyReconciler) ReconcileProxies(ctx context.Context, proxiesToWrite GeneratedProxies, writeNamespace string, labels map[string]string) error {
+	//logger := contextutils.LoggerFrom(ctx)
+	//ctx = contextutils.WithLogger(ctx, "proxyReconciler")
+
+	//logger.Errorf("PROXIES TO WRITE")
+	//logGeneratedProxies(logger, proxiesToWrite)
+
 	if err := s.addProxyValidationResults(ctx, proxiesToWrite); err != nil {
 		return errors.Wrapf(err, "failed to add proxy validation results to reports")
 	}
 
-	proxiesToWrite, err := stripInvalidListenersAndVirtualHosts(ctx, proxiesToWrite)
+	proxiesToWriteSafe, err := stripInvalidListenersAndVirtualHosts(ctx, proxiesToWrite)
 	if err != nil {
 		return err
 	}
+	//logger.Errorf("PROXIES TO WRITE AFTER VALIDATION AND STRIP INVALID")
+	//logGeneratedProxies(logger, proxiesToWriteSafe)
 
 	var allProxies gloov1.ProxyList
-	for proxy := range proxiesToWrite {
+	for proxy := range proxiesToWriteSafe {
 		allProxies = append(allProxies, proxy)
 	}
 
@@ -52,7 +89,7 @@ func (s *proxyReconciler) ReconcileProxies(ctx context.Context, proxiesToWrite G
 		return allProxies[i].Metadata.Less(allProxies[j].Metadata)
 	})
 
-	if err := s.baseReconciler.Reconcile(writeNamespace, allProxies, transitionFunc(proxiesToWrite), clients.ListOpts{
+	if err := s.baseReconciler.Reconcile(writeNamespace, allProxies, transitionFunc(proxiesToWriteSafe), clients.ListOpts{
 		Ctx:      ctx,
 		Selector: labels,
 	}); err != nil {
@@ -192,16 +229,30 @@ func stripInvalidListenersAndVirtualHosts(ctx context.Context, proxiesToWrite Ge
 // which is invalid and will be rejected by Envoy
 func transitionFunc(proxiesToWrite GeneratedProxies) gloov1.TransitionProxyFunc {
 	return func(original, desired *gloov1.Proxy) (b bool, e error) {
+		ctx := contextutils.WithLogger(context.TODO(), "translatorSyncer")
+		logger := contextutils.LoggerFrom(ctx)
+
+		logger.Errorf("-------------------------------------------")
+		logger.Errorf("-------- START PROXY RECONCILER -----------")
+		logger.Errorf("TRANSITION FUNCTION: Original Proxy")
+		logProxy(logger, original)
+		logger.Errorf("TRANSITION FUNCTION: Desired Proxy (1)")
+		logProxy(logger, desired)
+
 		// if any listeners from the old proxy were rejected in the new reports, preserve those
 		if err := forEachListener(original, proxiesToWrite[desired], func(listener *gloov1.Listener, accepted bool) {
 			// old listener was rejected, preserve it on the desired proxy
 			if !accepted {
+				logger.Errorf("listener %v not accepted", listener.GetName())
 				desired.Listeners = append(desired.Listeners, listener)
 			}
 		}); err != nil {
 			// should never happen
 			return false, err
 		}
+
+		logger.Errorf("TRANSITION FUNCTION: Desired Proxy (2)")
+		logProxy(logger, desired)
 
 		// preserve previous vhosts if new vservice was errored
 		for _, desiredListener := range desired.Listeners {
@@ -228,7 +279,14 @@ func transitionFunc(proxiesToWrite GeneratedProxies) gloov1.TransitionProxyFunc 
 			if err := forEachVhost(originalListener, proxiesToWrite[desired], func(vhost *gloov1.VirtualHost, accepted bool) {
 				// old vhost was rejected, preserve it on the desired proxy
 				if !accepted {
+					logger.Errorf("vhost %v not accepted. domains: [%v]", vhost.GetName(), vhost.GetDomains())
+					logger.Errorf("originalListener VirtualHosts")
+					logVirtualHostsOnListener(logger, originalListener)
+
 					desiredHttpListener.VirtualHosts = append(desiredHttpListener.VirtualHosts, vhost)
+
+					logger.Errorf("UPDATED desiredHttpListener VirtualHosts")
+					logVirtualHostsOnHttpListener(logger, desiredHttpListener)
 				}
 			}); err != nil {
 				// should never happen
@@ -245,6 +303,19 @@ func transitionFunc(proxiesToWrite GeneratedProxies) gloov1.TransitionProxyFunc 
 			return desired.Listeners[i].Name < desired.Listeners[j].Name
 		})
 
-		return utils.TransitionFunction(original, desired)
+		logger.Errorf("TRANSITION FUNCTION: Desired Proxy")
+		logProxy(logger, desired)
+
+
+		logger.Errorf("FULL DESIRED: %v,", desired)
+		logger.Errorf("FULL ORIGINAL: %v,", original)
+
+		res, err := utils.TransitionFunction(original, desired)
+
+		logger.Errorf("-------- END PROXY RECONCILER -----------")
+		logger.Errorf("---------- TRANSITION: %t -------------", res)
+		logger.Errorf("-----------------------------------------")
+
+		return res, err
 	}
 }

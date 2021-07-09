@@ -207,7 +207,6 @@ var _ = Describe("ReconcileGatewayProxies", func() {
 				snap.VirtualServices[1].Metadata.Generation = 100
 				genProxy()
 				addErr(snap.VirtualServices[1])
-
 				reconcile()
 
 				px := getProxy()
@@ -217,6 +216,40 @@ var _ = Describe("ReconcileGatewayProxies", func() {
 				Expect(vhosts).To(HaveLen(2))
 				Expect(vhosts[1]).To(HaveGeneration(100))
 				Expect(vhosts[0]).To(HaveGeneration(0))
+			})
+
+			FIt("TODO", func() {
+				// Reconcile proxy, ensure 1 virtual service maps to 1 virtual host
+				genProxy()
+				reconcile()
+
+				px := getProxy()
+				vhosts := px.Listeners[1].GetHttpListener().GetVirtualHosts()
+				Expect(vhosts).To(HaveLen(1))
+
+
+				// Add a second vs, update the previous vs to have the smae domain as the new one
+				samples.AddVsToSnap(snap, us, ns)
+				newVsDomain := snap.VirtualServices[1].VirtualHost.Domains[0]
+				snap.VirtualServices[0].VirtualHost.Domains = []string{newVsDomain}
+
+				samples.AddNamedVsToSnap(snap, us, "tertiary-vs", ns)
+
+				snap.Gateways[0].Status = nil // change gateway status
+				genProxy()
+
+
+
+				Expect(proxy.Listeners[0].GetHttpListener().GetVirtualHosts()).To(HaveLen(3))
+
+
+				reconcile()
+
+				Eventually(func() []*gloov1.VirtualHost {
+					px = getProxy()
+					return px.Listeners[1].GetHttpListener().GetVirtualHosts()
+				}, "5s", "1s").Should(HaveLen(3))
+
 			})
 		})
 

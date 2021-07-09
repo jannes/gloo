@@ -72,8 +72,11 @@ settings:
   create: true
   replaceInvalidRoutes: true
 gloo:
+  logLevel: error
   deployment:
     disableUsageStatistics: true
+gateway:
+  logLevel: error
 gatewayProxies:
   gatewayProxy:
     healthyPanicThreshold: 0
@@ -145,32 +148,59 @@ func getSnapOut(metricsPort string) string {
 
 // enable/disable strict validation
 func UpdateAlwaysAcceptSetting(ctx context.Context, alwaysAccept bool, installNamespace string) {
-	UpdateSettings(func(settings *v1.Settings) {
+	updateFunction := func(settings *v1.Settings) {
 		Expect(settings.Gateway).NotTo(BeNil())
 		Expect(settings.Gateway.Validation).NotTo(BeNil())
 		settings.Gateway.Validation.AlwaysAccept = &wrappers.BoolValue{Value: alwaysAccept}
-	}, ctx, installNamespace)
+	}
+
+	validateUpdateCompleted := func() {
+		time.Sleep(3 * time.Second)
+	}
+
+	UpdateSettings(updateFunction, validateUpdateCompleted, ctx, installNamespace)
+}
+
+func UpdateReplaceInvalidRoutesSetting(ctx context.Context, replaceInvalidRoutes bool, installNamespace string) {
+	updateFunction := func(settings *v1.Settings) {
+		Expect(settings.Gloo).NotTo(BeNil())
+		Expect(settings.Gloo.InvalidConfigPolicy).NotTo(BeNil())
+		settings.Gloo.InvalidConfigPolicy.ReplaceInvalidRoutes = replaceInvalidRoutes
+	}
+
+	validateUpdateCompleted := func() {
+		time.Sleep(3 * time.Second)
+	}
+
+	UpdateSettings(updateFunction, validateUpdateCompleted, ctx, installNamespace)
 }
 
 func UpdateRestEdsSetting(ctx context.Context, enableRestEds bool, installNamespace string) {
-	UpdateSettings(func(settings *v1.Settings) {
+	updateFunction := func(settings *v1.Settings) {
 		Expect(settings.Gloo).NotTo(BeNil())
 		settings.Gloo.EnableRestEds = &wrappers.BoolValue{Value: enableRestEds}
-	}, ctx, installNamespace)
+	}
+
+	validateUpdateCompleted := func() {
+		time.Sleep(3 * time.Second)
+	}
+
+	UpdateSettings(updateFunction, validateUpdateCompleted, ctx, installNamespace)
 }
 
-func UpdateSettings(f func(settings *v1.Settings), ctx context.Context, installNamespace string) {
+func UpdateSettings(updateFunction func(settings *v1.Settings), validateUpdateCompleted func(), ctx context.Context, installNamespace string) {
 	settingsClient := clienthelpers.MustSettingsClient(ctx)
 	settings, err := settingsClient.Read(installNamespace, "default", clients.ReadOpts{})
 	Expect(err).NotTo(HaveOccurred())
 
-	f(settings)
+	updateFunction(settings)
 
 	_, err = settingsClient.Write(settings, clients.WriteOpts{OverwriteExisting: true})
 	Expect(err).NotTo(HaveOccurred())
 
-	// when validation config changes, the validation server restarts -- give time for it to come up again.
+	// when validation config changes, the validation server restarts
+	// allow each setting change to inject how it will validate that the configuration was applied
 	// without the wait, the validation webhook may temporarily fallback to it's failurePolicy, which is not
 	// what we want to test.
-	time.Sleep(3 * time.Second)
+	validateUpdateCompleted()
 }

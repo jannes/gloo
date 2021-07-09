@@ -7,13 +7,14 @@ import (
 	"sort"
 	"time"
 
+	"github.com/solo-io/gloo/test/helpers"
+	"github.com/solo-io/solo-kit/pkg/api/v1/resources"
+
 	static_plugin_gloo "github.com/solo-io/gloo/projects/gloo/pkg/api/v1/options/static"
 
 	"github.com/solo-io/gloo/projects/gateway/pkg/defaults"
-	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/core/matchers"
-	skerrors "github.com/solo-io/solo-kit/pkg/errors"
-
 	"github.com/solo-io/gloo/projects/gateway/pkg/services/k8sadmisssion"
+	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/core/matchers"
 
 	testutils "github.com/solo-io/k8s-utils/testutils/kube"
 
@@ -125,13 +126,9 @@ var _ = Describe("Robustness tests", func() {
 		if virtualService != nil {
 			_ = virtualServiceClient.Delete(virtualService.Metadata.Namespace, virtualService.Metadata.Name, clients.DeleteOpts{Ctx: ctx, IgnoreNotExist: true})
 
-			Eventually(func() bool {
-				_, err := virtualServiceClient.Read(virtualService.Metadata.Namespace, virtualService.Metadata.Name, clients.ReadOpts{Ctx: ctx})
-				if err != nil && skerrors.IsNotExist(err) {
-					return true
-				}
-				return false
-			}, "15s", "0.5s").Should(BeTrue())
+			helpers.EventuallyResourceDeleted(func() (resources.InputResource, error) {
+				return virtualServiceClient.Read(virtualService.Metadata.Namespace, virtualService.Metadata.Name, clients.ReadOpts{Ctx: ctx})
+			}, "15s", "0.5s")
 		}
 		if appDeployment != nil {
 			err := kubeClient.AppsV1().Deployments(namespace).Delete(ctx, appDeployment.Name, metav1.DeleteOptions{GracePeriodSeconds: pointerToInt64(0)})

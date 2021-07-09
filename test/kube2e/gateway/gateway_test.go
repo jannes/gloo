@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/solo-io/solo-kit/pkg/api/v1/resources"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/options/cors"
 	"github.com/solo-io/gloo/projects/gloo/pkg/api/v1/options/headers"
 	"github.com/solo-io/go-utils/testutils"
@@ -467,13 +470,24 @@ var _ = Describe("Kube2e: gateway", func() {
 		})
 
 		Context("with a mix of valid and invalid virtual services", func() {
-			var (
-				validVsName   = "i-am-valid"
-				invalidVsName = "i-am-invalid"
-				petstoreName  = "petstore"
-			)
-			BeforeEach(func() {
 
+			var (
+				validVsName       = "i-am-valid"
+				alwaysValidVsName = "i-am-always-valid"
+				invalidVsName     = "i-am-invalid"
+				petstoreName      = "petstore"
+			)
+
+			beforeEach := func() {
+				alwaysValid := withName(alwaysValidVsName, withDomains([]string{"always.valid.com"},
+					getVirtualService(&gloov1.Destination{
+						DestinationType: &gloov1.Destination_Upstream{
+							Upstream: &core.ResourceRef{
+								Namespace: testHelper.InstallNamespace,
+								Name:      fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, helper.TestrunnerName, helper.TestRunnerPort),
+							},
+						},
+					}, nil)))
 				valid := withName(validVsName, withDomains([]string{"valid.com"},
 					getVirtualService(&gloov1.Destination{
 						DestinationType: &gloov1.Destination_Upstream{
@@ -483,6 +497,7 @@ var _ = Describe("Kube2e: gateway", func() {
 							},
 						},
 					}, nil)))
+
 				inValid := withName(invalidVsName, withDomains([]string{"invalid.com"},
 					getVirtualServiceWithRoute(&gatewayv1.Route{
 						Matchers: []*matchers.Matcher{{}},
@@ -491,16 +506,15 @@ var _ = Describe("Kube2e: gateway", func() {
 						},
 					}, nil)))
 
-				Eventually(func() error {
-					_, err := virtualServiceClient.Write(valid, clients.WriteOpts{})
-					return err
-				}, time.Second*10).ShouldNot(HaveOccurred())
+				_, err := virtualServiceClient.Write(valid, clients.WriteOpts{})
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = virtualServiceClient.Write(alwaysValid, clients.WriteOpts{})
+				Expect(err).NotTo(HaveOccurred())
 
 				// sanity check that validation is enabled/strict
-				Eventually(func() error {
-					_, err := virtualServiceClient.Write(inValid, clients.WriteOpts{})
-					return err
-				}, time.Second*10).Should(And(HaveOccurred(), MatchError(ContainSubstring("could not render proxy"))))
+				_, err = virtualServiceClient.Write(inValid, clients.WriteOpts{})
+				Expect(err).To(MatchError(ContainSubstring("could not render proxy")))
 
 				// disable strict validation
 				kube2e.UpdateAlwaysAcceptSetting(ctx, true, testHelper.InstallNamespace)
@@ -509,19 +523,33 @@ var _ = Describe("Kube2e: gateway", func() {
 					_, err := virtualServiceClient.Write(inValid, clients.WriteOpts{})
 					return err
 				}, time.Second*10).ShouldNot(HaveOccurred())
+			}
 
-			})
-			AfterEach(func() {
+			afterEach := func() {
 				_ = virtualServiceClient.Delete(testHelper.InstallNamespace, invalidVsName, clients.DeleteOpts{})
+				helpers.EventuallyResourceDeleted(func() (resources.InputResource, error) {
+					return virtualServiceClient.Read(testHelper.InstallNamespace, invalidVsName, clients.ReadOpts{})
+				}, "15s", "0.5s")
+
 				_ = virtualServiceClient.Delete(testHelper.InstallNamespace, validVsName, clients.DeleteOpts{})
-				_ = virtualServiceClient.Delete(testHelper.InstallNamespace, petstoreName, clients.DeleteOpts{})
-				_ = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
-				_ = kubeClient.AppsV1().Deployments(testHelper.InstallNamespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
+				helpers.EventuallyResourceDeleted(func() (resources.InputResource, error) {
+					return virtualServiceClient.Read(testHelper.InstallNamespace, validVsName, clients.ReadOpts{})
+				}, "15s", "0.5s")
+
+				_ = virtualServiceClient.Delete(testHelper.InstallNamespace, alwaysValidVsName, clients.DeleteOpts{})
+				helpers.EventuallyResourceDeleted(func() (resources.InputResource, error) {
+					return virtualServiceClient.Read(testHelper.InstallNamespace, alwaysValidVsName, clients.ReadOpts{})
+				}, "15s", "0.5s")
+
 				// important that we update the always accept setting after removing resources, or else we can have:
 				// "validation is disabled due to an invalid resource which has been written to storage.
 				// Please correct any Rejected resources to re-enable validation."
 				kube2e.UpdateAlwaysAcceptSetting(ctx, false, testHelper.InstallNamespace)
-			})
+			}
+
+			BeforeEach(beforeEach)
+			AfterEach(afterEach)
+
 			It("propagates the valid virtual services to envoy", func() {
 				testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
 					Protocol:          "http",
@@ -590,93 +618,271 @@ var _ = Describe("Kube2e: gateway", func() {
 				}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
 			})
 
-			It("adds the invalid virtual services back into the proxy when updating an upstream makes them valid", func() {
+			Context("preserves the valid virtual services in envoy when a virtual service has been made invalid", func() {
 
-				petstoreDeployment, petstoreSvc := petstore(testHelper.InstallNamespace)
-
-				// disable FDS for the petstore, create it without functions
-				petstoreSvc.Labels[syncer.FdsLabelKey] = "disabled"
-
-				petstoreSvc, err := kubeClient.CoreV1().Services(petstoreSvc.Namespace).Create(ctx, petstoreSvc, metav1.CreateOptions{})
-				Expect(err).NotTo(HaveOccurred())
-				petstoreDeployment, err = kubeClient.AppsV1().Deployments(petstoreDeployment.Namespace).Create(ctx, petstoreDeployment, metav1.CreateOptions{})
-				Expect(err).NotTo(HaveOccurred())
-
-				upstreamName := fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, petstoreName, 8080)
-
-				// the vs will be invalid
-				vsWithFunctionRoute := withName(petstoreName, withDomains([]string{"petstore.com"},
-					getVirtualService(&gloov1.Destination{
-						DestinationType: &gloov1.Destination_Upstream{
-							Upstream: &core.ResourceRef{
-								Namespace: testHelper.InstallNamespace,
-								Name:      upstreamName,
-							},
-						},
-						DestinationSpec: &gloov1.DestinationSpec{
-							DestinationType: &gloov1.DestinationSpec_Rest{
-								Rest: &gloorest.DestinationSpec{
-									FunctionName: "findPetById",
-								},
-							},
-						},
-					}, nil)))
-
-				vsWithFunctionRoute, err = virtualServiceClient.Write(vsWithFunctionRoute, clients.WriteOpts{})
-				Expect(err).NotTo(HaveOccurred())
-
-				// the VS should not be rejected since the failure is sanitized by route replacement
-				Eventually(func() (core.Status_State, error) {
-					vs, err := virtualServiceClient.Read(testHelper.InstallNamespace, petstoreName, clients.ReadOpts{})
-					if err != nil {
-						return 0, err
-					}
-					return vs.GetStatus().GetState(), nil
-				}, "15s", "0.5s").Should(Equal(core.Status_Accepted))
-
-				// wrapped in eventually to get around resource version errors
-				Eventually(func() error {
-					petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
+				runTest := func() {
+					invalidVs, err := virtualServiceClient.Read(testHelper.InstallNamespace, invalidVsName, clients.ReadOpts{})
 					Expect(err).NotTo(HaveOccurred())
 
-					Expect(petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()).To(BeEmpty())
-					petstoreUs.Metadata.Labels[syncer.FdsLabelKey] = "enabled"
+					validVs, err := virtualServiceClient.Read(testHelper.InstallNamespace, validVsName, clients.ReadOpts{})
+					Expect(err).NotTo(HaveOccurred())
 
-					_, err = upstreamClient.Write(petstoreUs, clients.WriteOpts{OverwriteExisting: true})
-					return err
-				}, "5s", "0.5s").ShouldNot(HaveOccurred())
+					alwaysValidVs, err := virtualServiceClient.Read(testHelper.InstallNamespace, alwaysValidVsName, clients.ReadOpts{})
+					Expect(err).NotTo(HaveOccurred())
 
-				// FDS should update the upstream with discovered rest spec
-				// it can take a long time for this to happen, perhaps petstore wasn't healthy yet?
-				Eventually(func() interface{} {
-					petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
-					Expect(err).ToNot(HaveOccurred())
-					return petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()
-				}, "120s", "1s").ShouldNot(BeEmpty())
+					// make the invalid vs valid and the valid vs invalid
+					invalidVh := invalidVs.VirtualHost
+					validVh := validVs.VirtualHost
+					validVh.Domains = []string{"all-good-in-the-hood.com"}
 
-				// we have updated an upstream, which prompts Gloo to send a notification to the
-				// gateway to resync virtual service status
+					invalidVs.VirtualHost = validVh // invalidVS now has all-good-in-the-hood domain
+					validVs.VirtualHost = invalidVh // validVS now has invalid.com domain, bad routes
 
-				// the VS should get accepted
-				Eventually(func() (core.Status_State, error) {
-					vs, err := virtualServiceClient.Read(vsWithFunctionRoute.GetMetadata().GetNamespace(), vsWithFunctionRoute.GetMetadata().GetName(), clients.ReadOpts{})
-					if err != nil {
-						return 0, err
-					}
-					return vs.GetStatus().GetState(), nil
-				}, "15s", "0.5s").Should(Equal(core.Status_Accepted))
+					// then we see that invalid.com exists on other vhosts
+					// so somehow the invalid.com vs
+
+					virtualServiceReconciler := gatewayv1.NewVirtualServiceReconciler(virtualServiceClient)
+					err = virtualServiceReconciler.Reconcile(testHelper.InstallNamespace, gatewayv1.VirtualServiceList{validVs, invalidVs, alwaysValidVs}, nil, clients.ListOpts{})
+					Expect(err).NotTo(HaveOccurred())
+
+					// the always valid virtual service should work
+					testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
+						Protocol:          "http",
+						Path:              "/",
+						Method:            "GET",
+						Host:              "always.valid.com",
+						Service:           gatewayProxy,
+						Port:              gatewayPort,
+						ConnectionTimeout: 1, // this is important, as sometimes curl hangs
+						WithoutStats:      true,
+					}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
+
+					// the original virtual service should work
+					testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
+						Protocol:          "http",
+						Path:              "/",
+						Method:            "GET",
+						Host:              "valid.com",
+						Service:           gatewayProxy,
+						Port:              gatewayPort,
+						ConnectionTimeout: 1, // this is important, as sometimes curl hangs
+						WithoutStats:      true,
+					}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
+
+					// the fixed virtual service should also work
+					testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
+						Protocol:          "http",
+						Path:              "/",
+						Method:            "GET",
+						Host:              "all-good-in-the-hood.com",
+						Service:           gatewayProxy,
+						Port:              gatewayPort,
+						ConnectionTimeout: 1, // this is important, as sometimes curl hangs
+						WithoutStats:      true,
+					}, helper.SimpleHttpResponse, 1, 60*time.Second, 1*time.Second)
+				}
+
+				It("works", func() {
+					runTest()
+				})
+
+				FIt("works MANY TIMES", func() {
+					repetitions := 100
+
+					runScaleTestsEasily(
+						func() {
+							beforeEach()
+						},
+						func() {
+							afterEach()
+						},
+						runTest,
+						repetitions)
+
+				})
+
+			})
+
+			Context("adds the invalid virtual services back into the proxy", func() {
+
+				var (
+					err                error
+					petstoreSvc        *corev1.Service
+					petstoreDeployment *v1.Deployment
+				)
+
+				contextBeforeEach := func() {
+					petstoreDeployment, petstoreSvc = petstore(testHelper.InstallNamespace)
+
+					// disable FDS for the petstore, create it without functions
+					petstoreSvc.Labels[syncer.FdsLabelKey] = "disabled"
+
+					petstoreSvc, err = kubeClient.CoreV1().Services(petstoreSvc.Namespace).Create(ctx, petstoreSvc, metav1.CreateOptions{})
+					Expect(err).NotTo(HaveOccurred())
+					petstoreDeployment, err = kubeClient.AppsV1().Deployments(petstoreDeployment.Namespace).Create(ctx, petstoreDeployment, metav1.CreateOptions{})
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				contextAfterEach := func() {
+					_ = virtualServiceClient.Delete(petstoreSvc.Namespace, petstoreName, clients.DeleteOpts{})
+					helpers.EventuallyResourceDeleted(func() (resources.InputResource, error) {
+						return virtualServiceClient.Read(petstoreSvc.Namespace, petstoreName, clients.ReadOpts{})
+					}, "15s", "0.5s")
+
+					_ = kubeClient.CoreV1().Services(petstoreSvc.Namespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
+					helpers.EventuallyObjectDeleted(func() (client.Object, error) {
+						return kubeClient.CoreV1().Services(petstoreSvc.Namespace).Get(ctx, petstoreName, metav1.GetOptions{})
+					})
+
+					_ = kubeClient.AppsV1().Deployments(petstoreDeployment.Namespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
+					helpers.EventuallyObjectDeleted(func() (client.Object, error) {
+						return kubeClient.AppsV1().Deployments(petstoreDeployment.Namespace).Get(ctx, petstoreName, metav1.GetOptions{})
+					})
+				}
+
+				BeforeEach(contextBeforeEach)
+				AfterEach(contextAfterEach)
+
+				runTest := func() {
+					upstreamName := fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, petstoreName, 8080)
+
+					// the vs will be invalid
+					vsWithFunctionRoute := withName(petstoreName, withDomains([]string{"petstore.com"},
+						getVirtualService(&gloov1.Destination{
+							DestinationType: &gloov1.Destination_Upstream{
+								Upstream: &core.ResourceRef{
+									Namespace: testHelper.InstallNamespace,
+									Name:      upstreamName,
+								},
+							},
+							DestinationSpec: &gloov1.DestinationSpec{
+								DestinationType: &gloov1.DestinationSpec_Rest{
+									Rest: &gloorest.DestinationSpec{
+										FunctionName: "findPetById",
+									},
+								},
+							},
+						}, nil)))
+
+					vsWithFunctionRoute, err := virtualServiceClient.Write(vsWithFunctionRoute, clients.WriteOpts{})
+					Expect(err).NotTo(HaveOccurred())
+
+					// the VS should not be rejected since the failure is sanitized by route replacement
+					helpers.EventuallyResourceAccepted(func() (resources.InputResource, error) {
+						return virtualServiceClient.Read(testHelper.InstallNamespace, petstoreName, clients.ReadOpts{})
+					})
+
+					// wrapped in eventually to get around resource version errors
+					Eventually(func() error {
+						petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
+						Expect(err).NotTo(HaveOccurred())
+
+						Expect(petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()).To(BeEmpty())
+						petstoreUs.Metadata.Labels[syncer.FdsLabelKey] = "enabled"
+
+						_, err = upstreamClient.Write(petstoreUs, clients.WriteOpts{OverwriteExisting: true})
+						return err
+					}, "5s", "0.5s").ShouldNot(HaveOccurred())
+
+					// FDS should update the upstream with discovered rest spec
+					// it can take a long time for this to happen, perhaps petstore wasn't healthy yet?
+					Eventually(func() interface{} {
+						petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
+						Expect(err).ToNot(HaveOccurred())
+						return petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()
+					}, "120s", "3s").ShouldNot(BeEmpty())
+
+					// we have updated an upstream, which prompts Gloo to send a notification to the
+					// gateway to resync virtual service status
+
+					// the VS should get accepted
+					helpers.EventuallyResourceAccepted(func() (resources.InputResource, error) {
+						return virtualServiceClient.Read(vsWithFunctionRoute.GetMetadata().GetNamespace(), vsWithFunctionRoute.GetMetadata().GetName(), clients.ReadOpts{})
+					})
+				}
+
+				It("Runs test 100 times without teardown", func() {
+					repetitions := 3
+
+					runScaleTestsEasily(
+						func() {
+							beforeEach()
+							contextBeforeEach()
+						},
+						func() {
+							contextAfterEach()
+							afterEach()
+						},
+						runTest,
+						repetitions)
+				})
+
+				It("when updating an upstream makes them valid", func() {
+					upstreamName := fmt.Sprintf("%s-%s-%v", testHelper.InstallNamespace, petstoreName, 8080)
+
+					// the vs will be invalid
+					vsWithFunctionRoute := withName(petstoreName, withDomains([]string{"petstore.com"},
+						getVirtualService(&gloov1.Destination{
+							DestinationType: &gloov1.Destination_Upstream{
+								Upstream: &core.ResourceRef{
+									Namespace: testHelper.InstallNamespace,
+									Name:      upstreamName,
+								},
+							},
+							DestinationSpec: &gloov1.DestinationSpec{
+								DestinationType: &gloov1.DestinationSpec_Rest{
+									Rest: &gloorest.DestinationSpec{
+										FunctionName: "findPetById",
+									},
+								},
+							},
+						}, nil)))
+
+					vsWithFunctionRoute, err := virtualServiceClient.Write(vsWithFunctionRoute, clients.WriteOpts{})
+					Expect(err).NotTo(HaveOccurred())
+
+					// the VS should not be rejected since the failure is sanitized by route replacement
+					helpers.EventuallyResourceAccepted(func() (resources.InputResource, error) {
+						return virtualServiceClient.Read(testHelper.InstallNamespace, petstoreName, clients.ReadOpts{})
+					})
+
+					// wrapped in eventually to get around resource version errors
+					Eventually(func() error {
+						petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
+						Expect(err).NotTo(HaveOccurred())
+
+						Expect(petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()).To(BeEmpty())
+						petstoreUs.Metadata.Labels[syncer.FdsLabelKey] = "enabled"
+
+						_, err = upstreamClient.Write(petstoreUs, clients.WriteOpts{OverwriteExisting: true})
+						return err
+					}, "5s", "0.5s").ShouldNot(HaveOccurred())
+
+					// FDS should update the upstream with discovered rest spec
+					// it can take a long time for this to happen, perhaps petstore wasn't healthy yet?
+					Eventually(func() interface{} {
+						petstoreUs, err := upstreamClient.Read(testHelper.InstallNamespace, upstreamName, clients.ReadOpts{})
+						Expect(err).ToNot(HaveOccurred())
+						return petstoreUs.GetKube().GetServiceSpec().GetRest().GetSwaggerInfo().GetUrl()
+					}, "120s", "3s").ShouldNot(BeEmpty())
+
+					// we have updated an upstream, which prompts Gloo to send a notification to the
+					// gateway to resync virtual service status
+
+					// the VS should get accepted
+					helpers.EventuallyResourceAccepted(func() (resources.InputResource, error) {
+						return virtualServiceClient.Read(vsWithFunctionRoute.GetMetadata().GetNamespace(), vsWithFunctionRoute.GetMetadata().GetName(), clients.ReadOpts{})
+					})
+
+				})
 			})
 		})
 
 		Context("with a mix of valid and invalid routes on a single virtual service", func() {
 			var vs *gatewayv1.VirtualService
-			BeforeEach(func() {
 
-				kube2e.UpdateSettings(func(settings *gloov1.Settings) {
-					Expect(settings.Gloo).NotTo(BeNil())
-					Expect(settings.Gloo.InvalidConfigPolicy).NotTo(BeNil())
-					settings.Gloo.InvalidConfigPolicy.ReplaceInvalidRoutes = true
-				}, ctx, testHelper.InstallNamespace)
+			BeforeEach(func() {
+				kube2e.UpdateReplaceInvalidRoutesSetting(ctx, true, testHelper.InstallNamespace)
 
 				vs = withRoute(&gatewayv1.Route{
 					Matchers: []*matchers.Matcher{{PathSpecifier: &matchers.Matcher_Prefix{Prefix: "/invalid-route"}}},
@@ -699,21 +905,21 @@ var _ = Describe("Kube2e: gateway", func() {
 					},
 				}, nil))
 
-				Eventually(func() error {
-					_, err := virtualServiceClient.Write(vs, clients.WriteOpts{})
-					return err
-				}, time.Second*10).ShouldNot(HaveOccurred())
+				_, err := virtualServiceClient.Write(vs, clients.WriteOpts{})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Wait for the valid vs to be accepted
+				helpers.EventuallyResourceAccepted(func() (resources.InputResource, error) {
+					return virtualServiceClient.Read(vs.GetMetadata().GetNamespace(), vs.GetMetadata().GetName(), clients.ReadOpts{})
+				})
 			})
+
 			AfterEach(func() {
 				_ = virtualServiceClient.Delete(vs.Metadata.Namespace, vs.Metadata.Name, clients.DeleteOpts{})
 
-				kube2e.UpdateSettings(func(settings *gloov1.Settings) {
-					Expect(settings.Gloo).NotTo(BeNil())
-					Expect(settings.Gloo.InvalidConfigPolicy).NotTo(BeNil())
-					settings.Gloo.InvalidConfigPolicy.ReplaceInvalidRoutes = false
-				}, ctx, testHelper.InstallNamespace)
-
+				kube2e.UpdateReplaceInvalidRoutesSetting(ctx, false, testHelper.InstallNamespace)
 			})
+
 			It("serves a direct response for the invalid route response", func() {
 				// the valid route should work
 				testHelper.CurlEventuallyShouldRespond(helper.CurlOpts{
@@ -1476,6 +1682,11 @@ var _ = Describe("Kube2e: gateway", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
+			// Ensure the redblue service is deleted
+			helpers.EventuallyObjectDeleted(func() (client.Object, error) {
+				return kubeClient.CoreV1().Services(testHelper.InstallNamespace).Get(ctx, service.Name, metav1.GetOptions{})
+			}, "15s", ".5s")
+
 			Eventually(func() error {
 				coloredPods, err := kubeClient.CoreV1().Pods(testHelper.InstallNamespace).List(ctx,
 					metav1.ListOptions{LabelSelector: labels.SelectorFromSet(map[string]string{"app": "redblue"}).String()})
@@ -2112,4 +2323,30 @@ spec:
 	Expect(err).NotTo(HaveOccurred())
 
 	return &dep, &svc
+}
+
+func runScaleTestsEasily(setupTestFun func(), tearDownTestFun func(), testFun func(), repetitions int) {
+	testRun := 1
+
+	fmt.Printf("RUNNING TEST: %d of %d\n", testRun, repetitions)
+	testFun()
+
+	// Cleanup the first test run
+	tearDownTestFun()
+
+	for testRun += 1; testRun < repetitions; testRun++ {
+		fmt.Printf("RUNNING TEST: %d of %d\n", testRun, repetitions)
+		setupTestFun()
+
+		testFun()
+
+		tearDownTestFun()
+		fmt.Printf("\n --------- \n")
+	}
+
+	// Run it again, and let ginkgo clean it up
+	fmt.Printf("RUNNING TEST: %d of %d\n", testRun, repetitions)
+	setupTestFun()
+
+	testFun()
 }

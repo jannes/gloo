@@ -10,6 +10,7 @@ func TransitionFunction(original, desired *v1.Proxy) (bool, error) {
 		updateDesiredStatus(original, desired)
 		return true, nil
 	}
+
 	for i := range original.Listeners {
 		if !original.Listeners[i].Equal(desired.Listeners[i]) {
 			updateDesiredStatus(original, desired)

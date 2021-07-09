@@ -75,7 +75,29 @@ func (s *translatorSyncer) Sync(ctx context.Context, snap *v1.ApiSnapshot) error
 		logger.Debug(syncutil.StringifySnapshot(snap))
 	}
 
+	logger.Errorf("SNAPSHOT Virtual Services")
+	for _, vs := range snap.VirtualServices {
+		logger.Errorf("%v", vs)
+	}
 	desiredProxies := s.generatedDesiredProxies(ctx, snap)
+	logger.Errorf("GATEWAY DESIRED PROXIES")
+
+	for prox, reports := range desiredProxies {
+		logger.Errorf("PROXY LISTENERS")
+		for _, listener := range prox.Listeners {
+			logger.Errorf("Listener Name : %v", listener.Name)
+			for _, vh := range listener.GetHttpListener().VirtualHosts {
+				logger.Errorf("VIRTUAL HOST [Name: %s, Domains: %v]", vh.GetName(), vh.GetDomains())
+			}
+		}
+		logger.Errorf("REPORTS")
+		for inputResource, report := range reports {
+			logger.Errorf("inputResource:[name: %v, status: %v]", inputResource.GetMetadata().GetName(), inputResource.GetStatus())
+			logger.Errorf("report: %v", report)
+		}
+	}
+
+	logger.Errorf("(END) GATEWAY DESIRED PROXIES")
 
 	return s.reconcile(ctx, desiredProxies)
 }
@@ -326,10 +348,17 @@ func (s *statusSyncer) syncStatus(ctx context.Context) error {
 		}
 	}()
 
+	ctx = contextutils.WithLogger(ctx, "statusSyncer")
+	logger := contextutils.LoggerFrom(ctx)
+
 	var errs error
 	for inputResource, subresourceStatuses := range allReports {
+		logger.Errorf("SYNC INPUT RESOURCE: %s", inputResource.GetMetadata().GetName())
+		logger.Errorf("subresourceStatuses: %v", subresourceStatuses)
+
 		// write reports may update the status, so clone the object
 		currentStatuses := inputResourceBySubresourceStatuses[inputResource]
+		logger.Errorf("currentStatuses: %v", currentStatuses)
 		clonedInputResource := resources.Clone(inputResource).(resources.InputResource)
 		reports := reporter.ResourceReports{clonedInputResource: subresourceStatuses}
 		// set the last known status on the input resource.
@@ -338,13 +367,20 @@ func (s *statusSyncer) syncStatus(ctx context.Context) error {
 		if status, ok := localInputResourceLastStatus[inputResource]; ok {
 			clonedInputResource.SetStatus(status)
 		}
+
+		logger.Errorf("reporter.WriteReports: %v", reports)
 		if err := s.reporter.WriteReports(ctx, reports, currentStatuses); err != nil {
+			logger.Errorf("reporter.Writer reports returned an error!!: %v", err)
 			errs = multierror.Append(errs, err)
 		} else {
+			logger.Errorf("reporter.Writer reports succeeded")
 			// cache the status written by the reporter
 			status := s.reporter.StatusFromReport(subresourceStatuses, currentStatuses)
+			logger.Errorf("reporter.StatusFromReport: %v", status)
 			localInputResourceLastStatus[inputResource] = status
 		}
+		logger.Errorf("(END) SYNC INPUT RESOURCE")
+		logger.Errorf("--------")
 	}
 	return errs
 }
