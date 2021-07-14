@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 
 	"github.com/Masterminds/semver/v3"
@@ -22,30 +23,27 @@ func main() {
 	ctx := context.Background()
 	app := rootApp(ctx)
 	if err := app.Execute(); err != nil {
-		fmt.Printf("unable to run: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("unable to run: %v\n", err)
 	}
 }
 
 type options struct {
-	ctx context.Context
+	ctx        context.Context
+	targetRepo string
 }
 
 func rootApp(ctx context.Context) *cobra.Command {
 	opts := &options{
 		ctx: ctx,
 	}
-	app := &cobra.Command{
-		Use: "docs-util",
-		RunE: func(cmd *cobra.Command, args []string) error {
-
-			return nil
-		},
-	}
+	app := &cobra.Command{}
 	app.AddCommand(changelogMdFromGithubCmd(opts))
 	app.AddCommand(securityScanMdFromCmd(opts))
 	app.AddCommand(enterpriseHelmValuesMdFromGithubCmd(opts))
 	app.AddCommand(getReleasesCmd(opts))
+	app.AddCommand(runSecurityScanCmd(opts))
+	app.PersistentFlags().StringVarP(&opts.targetRepo, "TargetRepo", "r", glooOpenSourceRepo, "specify one of 'gloo' or 'glooe'")
+	_ = app.MarkFlagRequired("TargetRepo")
 
 	return app
 }
@@ -61,40 +59,17 @@ func getReleasesCmd(opts *options) *cobra.Command {
 	return app
 }
 
-func fetchAndSerializeReleases(opts *options) func(cmd *cobra.Command, args []string) error {
-	return func(cmd *cobra.Command, args []string) error {
-		if !useCachedReleases() {
-			return nil
-		}
-		if len(args) != 1 {
-			return InvalidInputError(fmt.Sprintf("%v", len(args)-1))
-		}
-		client, err := githubutils.GetClient(opts.ctx)
-		if err != nil {
-			return err
-		}
-		target := args[0]
-		switch target {
-		case glooDocGen:
-			err = getRepoReleases(opts.ctx, glooOpenSourceRepo, client)
-		case glooEDocGen:
-			err = getRepoReleases(opts.ctx, glooEnterpriseRepo, client)
-		default:
-			return InvalidInputError(target)
-		}
-		return err
-	}
-}
-
+// Pulls scan results from google cloud bucket during docs generation.
+// Then generates a human-readable single page for all our security scan results.
 func securityScanMdFromCmd(opts *options) *cobra.Command {
 	app := &cobra.Command{
 		Use:   "gen-security-scan-md",
-		Short: "generate a markdown file from gcloud bucket",
+		Short: "pull down security scan files from gcloud bucket and generate docs markdown file",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv(skipSecurityScan) != "" {
 				return nil
 			}
-			return generateSecurityScanMd(args)
+			return generateSecurityScanMd(opts)
 		},
 	}
 	return app
@@ -108,7 +83,7 @@ func changelogMdFromGithubCmd(opts *options) *cobra.Command {
 			if os.Getenv(skipChangelogGeneration) != "" {
 				return nil
 			}
-			return generateChangelogMd(args)
+			return generateChangelogMd(opts)
 		},
 	}
 	return app
@@ -126,6 +101,57 @@ func enterpriseHelmValuesMdFromGithubCmd(opts *options) *cobra.Command {
 		},
 	}
 	return app
+}
+
+// Command for running the actual security scan on the images
+// running this runs trivy on all images for versions greater than
+// MIN_SCANNED_VERSION.
+// Uploads scanning results to github security tab and google cloud bucket.
+func runSecurityScanCmd(opts *options) *cobra.Command {
+
+	app := &cobra.Command{
+		Use:   "run-security-scan",
+		Short: "runs trivy scans on images from repo specified",
+		Long:  "runs trivy vulnerability scans on images from the repo specified. Only reports HIGH and CRITICAL-level vulnerabilities and uploads scan results to google cloud bucket and github security page",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch opts.targetRepo {
+			case glooDocGen:
+				err := scanGlooImages(opts.ctx)
+				return err
+			case glooEDocGen:
+				err := scanGlooEImages(opts.ctx)
+				return err
+			default:
+				return InvalidInputError(opts.targetRepo)
+			}
+		},
+	}
+	return app
+}
+
+// Fetches releases and serializes them and prints to stdout.
+// This is meant to be used so that releases can be cached locally for multiple tasks
+// such as security scanning, changelog generation
+// rather than fetch all repo releases per task and risk hitting GitHub ratelimit
+func fetchAndSerializeReleases(opts *options) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if !useCachedReleases() {
+			return nil
+		}
+		client, err := githubutils.GetClient(opts.ctx)
+		if err != nil {
+			return err
+		}
+		switch opts.targetRepo {
+		case glooDocGen:
+			err = getRepoReleases(opts.ctx, glooOpenSourceRepo, client)
+		case glooEDocGen:
+			err = getRepoReleases(opts.ctx, glooEnterpriseRepo, client)
+		default:
+			return InvalidInputError(opts.targetRepo)
+		}
+		return err
+	}
 }
 
 // Serialized github RepositoryRelease array to be written to file
@@ -176,13 +202,9 @@ var (
 
 // Generates changelog for releases as fetched from Github
 // Github defaults to a chronological order
-func generateChangelogMd(args []string) error {
-	if len(args) != 1 {
-		return InvalidInputError(fmt.Sprintf("%v", len(args)-1))
-	}
-	client := github.NewClient(nil)
-	target := args[0]
-	switch target {
+func generateChangelogMd(opts *options) error {
+	client := githubutils.GetClientOrExit(context.Background())
+	switch opts.targetRepo {
 	case glooDocGen:
 		generator := changelogdocutils.NewMinorReleaseGroupedChangelogGenerator(changelogdocutils.Options{
 			MainRepo:         "gloo",
@@ -200,7 +222,7 @@ func generateChangelogMd(args []string) error {
 			return err
 		}
 	default:
-		return InvalidInputError(target)
+		return InvalidInputError(opts.targetRepo)
 	}
 
 	return nil
@@ -262,32 +284,63 @@ func useCachedReleases() bool {
 }
 
 // Generates security scan log for releases
-func generateSecurityScanMd(args []string) error {
-	if len(args) != 1 {
-		return InvalidInputError(fmt.Sprintf("%v", len(args)-1))
-	}
-	target := args[0]
-	var (
-		err error
-	)
-	switch target {
+func generateSecurityScanMd(opts *options) error {
+	var err error
+	switch opts.targetRepo {
 	case glooDocGen:
 		err = generateSecurityScanGloo(context.Background())
 	case glooEDocGen:
 		err = generateSecurityScanGlooE(context.Background())
 	default:
-		return InvalidInputError(target)
+		return InvalidInputError(opts.targetRepo)
 	}
 
 	return err
 }
 
+// List of images included in gloo edge open source
+func OpenSourceImages() []string {
+	return []string{"access-logger", "certgen", "discovery", "gateway", "gloo", "gloo-envoy-wrapper", "ingress", "sds"}
+}
+
+// List of images only included in gloo edge enterprise
+func EnterpriseImages() []string {
+	return []string{"rate-limit-ee", "gloo-ee", "gloo-ee-envoy-wrapper", "observability-ee", "extauth-ee", "gloo-fed", "gloo-fed-apiserver", "gloo-fed-apiserver-envoy", "gloo-federation-console", "gloo-fed-rbac-validating-webhook"}
+}
+
+func scanGlooImages(ctx context.Context) error {
+	client := githubutils.GetClientOrExit(ctx)
+	allReleases, err := githubutils.GetAllRepoReleases(ctx, client, "solo-io", glooOpenSourceRepo)
+	if err != nil {
+		return err
+	}
+
+	githubutils.SortReleasesBySemver(allReleases)
+	versionsToScan := getVersionsToScan(allReleases)
+	return RunSecurityScanOnVersions(versionsToScan, OpenSourceImages(), "gloo")
+}
+
+func scanGlooEImages(ctx context.Context) error {
+	client, err := githubutils.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+	allReleases, err := githubutils.GetAllRepoReleases(ctx, client, "solo-io", glooEnterpriseRepo)
+	if err != nil {
+		return err
+	}
+	githubutils.SortReleasesBySemver(allReleases)
+	versionsToScan := getVersionsToScan(allReleases)
+	return RunSecurityScanOnVersions(versionsToScan, EnterpriseImages(), "glooe")
+}
+
 func generateSecurityScanGloo(ctx context.Context) error {
-	client := github.NewClient(nil)
-	var (
-		allReleases []*github.RepositoryRelease
-		err         error
-	)
+	// Initialize Auth
+	client, err := githubutils.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+	var allReleases []*github.RepositoryRelease
 	if useCachedReleases() {
 		allReleases = getCachedReleases(glooCachedReleasesFile)
 	} else {
@@ -297,18 +350,8 @@ func generateSecurityScanGloo(ctx context.Context) error {
 		}
 	}
 	githubutils.SortReleasesBySemver(allReleases)
-
-	var tagNames []string
-	for _, release := range allReleases {
-		// ignore beta releases when display security scan results
-		test, err := semver.NewVersion(release.GetTagName())
-		stableOnlyConstraint, _ := semver.NewConstraint(">= 1.4.0")
-		if err == nil && stableOnlyConstraint.Check(test) {
-			tagNames = append(tagNames, release.GetTagName())
-		}
-	}
-
-	return BuildSecurityScanReportGloo(tagNames)
+	versionsToScan := getVersionsToScan(allReleases)
+	return BuildSecurityScanReportGloo(versionsToScan)
 }
 
 func generateSecurityScanGlooE(ctx context.Context) error {
@@ -326,19 +369,10 @@ func generateSecurityScanGlooE(ctx context.Context) error {
 			return err
 		}
 	}
+
 	githubutils.SortReleasesBySemver(allReleases)
-
-	var tagNames []string
-	for _, release := range allReleases {
-		// ignore beta releases when display security scan results
-		test, err := semver.NewVersion(release.GetTagName())
-		stableOnlyConstraint, _ := semver.NewConstraint(">= 1.4.0")
-		if err == nil && stableOnlyConstraint.Check(test) {
-			tagNames = append(tagNames, release.GetTagName())
-		}
-	}
-
-	return BuildSecurityScanReportGlooE(tagNames)
+	versionsToScan := getVersionsToScan(allReleases)
+	return BuildSecurityScanReportGlooE(versionsToScan)
 }
 
 func fetchEnterpriseHelmValues(args []string) error {
@@ -375,4 +409,33 @@ func fetchEnterpriseHelmValues(args []string) error {
 	fmt.Printf("%s", decodedContents)
 
 	return nil
+}
+
+func getVersionsToScan(releases []*github.RepositoryRelease) []string {
+	var (
+		versions             []string
+		stableOnlyConstraint *semver.Constraints
+		err                  error
+	)
+	minVersionToScan := os.Getenv("MIN_SCANNED_VERSION")
+	if minVersionToScan == "" {
+		log.Println("MIN_SCANNED_VERSION environment variable not set, scanning all versions from repo")
+	} else {
+		stableOnlyConstraint, err = semver.NewConstraint(fmt.Sprintf(">= %s", minVersionToScan))
+		if err != nil {
+			log.Fatalf("Invalid constraint version: %s", minVersionToScan)
+		}
+	}
+
+	for _, release := range releases {
+		// ignore beta releases when display security scan results
+		test, err := semver.NewVersion(release.GetTagName())
+		if err != nil {
+			continue
+		}
+		if stableOnlyConstraint == nil || stableOnlyConstraint.Check(test) {
+			versions = append(versions, test.String())
+		}
+	}
+	return versions
 }

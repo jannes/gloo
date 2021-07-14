@@ -158,6 +158,9 @@ apis:
   enterprise.gloo.solo.io.OpaAuth:
     relativepath: reference/api/github.com/solo-io/gloo/projects/gloo/api/v1/enterprise/options/extauth/v1/extauth.proto.sk/#OpaAuth
     package: enterprise.gloo.solo.io
+  enterprise.gloo.solo.io.OpaAuthOptions:
+    relativepath: reference/api/github.com/solo-io/gloo/projects/gloo/api/v1/enterprise/options/extauth/v1/extauth.proto.sk/#OpaAuthOptions
+    package: enterprise.gloo.solo.io
   enterprise.gloo.solo.io.PassThroughAuth:
     relativepath: reference/api/github.com/solo-io/gloo/projects/gloo/api/v1/enterprise/options/extauth/v1/extauth.proto.sk/#PassThroughAuth
     package: enterprise.gloo.solo.io
@@ -361,6 +364,9 @@ apis:
     package: gateway.solo.io
   gateway.solo.io.VirtualService:
     relativepath: reference/api/github.com/solo-io/gloo/projects/gateway/api/v1/virtual_service.proto.sk/#VirtualService
+    package: gateway.solo.io
+  gateway.solo.io.VirtualServiceSelectorExpressions:
+    relativepath: reference/api/github.com/solo-io/gloo/projects/gateway/api/v1/gateway.proto.sk/#VirtualServiceSelectorExpressions
     package: gateway.solo.io
   gloo.solo.io.Artifact:
     relativepath: reference/api/github.com/solo-io/gloo/projects/gloo/api/v1/artifact.proto.sk/#Artifact

@@ -693,13 +693,17 @@ security-checks:
 	./trivy --exit-code 0 --severity HIGH,CRITICAL --no-progress --format template --template "@hack/utils/security_scan_report/markdown.tpl" -o $(SCAN_DIR)/$(VERSION)/sds_cve_report.docgen $(IMAGE_REPO)/sds:$(VERSION) && \
 	./trivy --exit-code 0 --severity HIGH,CRITICAL --no-progress --format template --template "@hack/utils/security_scan_report/markdown.tpl" -o $(SCAN_DIR)/$(VERSION)/access-logger_cve_report.docgen $(IMAGE_REPO)/access-logger:$(VERSION)
 
-SCAN_BUCKET ?= solo-gloo-security-scans/gloo
+SCAN_BUCKET ?= solo-gloo-security-scans
+
+.PHONY: run-security-scans
+run-security-scan:
+	GO111MODULE=on go run docs/cmd/generate_docs.go run-security-scan -r gloo
+	GO111MODULE=on go run docs/cmd/generate_docs.go run-security-scan -r glooe
 
 .PHONY: publish-security-scan
 publish-security-scan:
-ifeq ($(RELEASE),"true")
-	gsutil cp -r $(SCAN_DIR)/$(VERSION)/$(SCAN_FILE) gs://$(SCAN_BUCKET)/$(VERSION)/$(SCAN_FILE)
-endif
+	gsutil cp -r $(SCAN_DIR)/gloo/markdown_results/** gs://$(SCAN_BUCKET)/gloo
+	gsutil cp -r $(SCAN_DIR)/glooe/markdown_results/** gs://$(SCAN_BUCKET)/glooe
 
 #----------------------------------------------------------------------------------
 # Third Party License Management
