@@ -43,7 +43,6 @@ jobs:
           sudo mv codeql /usr/local/bin/codeql
           PATH="/usr/local/bin/codeql:$PATH"
           rm -rf tmp.zip codeql
-          codeql
       - name: Set up Go 1.16.3
         uses: actions/setup-go@v2
         with:
