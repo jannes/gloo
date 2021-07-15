@@ -42,6 +42,7 @@ jobs:
           unzip tmp.zip
           sudo mv codeql/codeql /usr/local/bin/codeql
           rm -rf tmp.zip codeql
+          codeql
       - name: Set up Go 1.16.3
         uses: actions/setup-go@v2
         with:
@@ -59,7 +60,7 @@ jobs:
         env:
           SCAN_DIR: ${{ env.SCAN_DIR }}
           IMAGE_REPO: quay.io/solo-io
-          MIN_SCANNED_VERSION: 'v1.6.0'
+          MIN_SCANNED_VERSION: 'v1.8.0'
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
           mkdir -p ${{ env.SCAN_DIR }}
