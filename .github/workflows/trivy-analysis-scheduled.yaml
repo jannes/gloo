@@ -34,10 +34,14 @@ jobs:
 
           echo "After clearing disk space:"
           df -h
-      - name: Install Trivy
+      - name: Install Trivy and Codeql
         run: |
           wget https://github.com/aquasecurity/trivy/releases/download/v0.18.3/trivy_0.18.3_Linux-64bit.deb
           sudo dpkg -i trivy_0.18.3_Linux-64bit.deb
+          wget -O tmp.zip https://github.com/github/codeql-cli-binaries/releases/download/v2.5.7/codeql-linux64.zip
+          tar -xf tmp.zip
+          echo $PATH
+          sudo mv codeql/codeql /usr/local/bin/codeql
       - name: Set up Go 1.16.3
         uses: actions/setup-go@v2
         with:
