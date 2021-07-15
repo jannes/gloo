@@ -209,6 +209,16 @@ func CreateScanFileAndRunScan(fileDir, fileName, image, versionTag, templateFile
 	return err
 }
 
+func UploadSecurityScanToGithub(fileName, versionTag string) error {
+	args := fmt.Sprintf("github upload-results --sarif=%s --repository=solo-io/gloo --ref=refs/tags/v%s --commit=$(git rev-parse tags/refs/v%s) ", fileName, versionTag, versionTag)
+	cmd := exec.Command("codeql", strings.Split(args, " ")...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return eris.Wrapf(err, "Error, logs: %s", string(out))
+	}
+	return nil
+}
+
 // Runs trivy scan command
 func RunTrivyScan(image, version, templateFile, output string) error {
 	args := []string{"image", "--severity", "HIGH,CRITICAL", "--format", "template", "--template", templateFile, "--output", output, image}

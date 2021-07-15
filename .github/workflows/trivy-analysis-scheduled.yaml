@@ -40,9 +40,8 @@ jobs:
           sudo dpkg -i trivy_0.18.3_Linux-64bit.deb
           wget -O tmp.zip https://github.com/github/codeql-cli-binaries/releases/download/v2.5.7/codeql-linux64.zip
           unzip tmp.zip
-          ls
-          echo $PATH
           sudo mv codeql/codeql /usr/local/bin/codeql
+          rm -rf tmp.zip codeql
       - name: Set up Go 1.16.3
         uses: actions/setup-go@v2
         with:
@@ -65,7 +64,7 @@ jobs:
         run: |
           mkdir -p ${{ env.SCAN_DIR }}
           make run-security-scan
-          make publish-security-scan
+#          make publish-security-scan
       # upload both open source and enterprise scan results to GH security tab
       - name: Upload Open source Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v1
