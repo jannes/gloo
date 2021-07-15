@@ -227,6 +227,7 @@ func UploadSecurityScanToGithub(fileName, versionTag string) error {
 	cmd := exec.Command("git", "rev-parse", fmt.Sprintf("refs/tags/v%s", versionTag))
 	out, err := cmd.Output()
 	if err != nil {
+		fmt.Println(string(out))
 		return eris.Wrapf(err, "error getting commit sha for tag %s", versionTag)
 	}
 	githubToken := os.Getenv("GITHUB_TOKEN")
