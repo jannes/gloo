@@ -1,7 +1,11 @@
 package securityscanutils
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"fmt"
+	"github.com/imroc/req"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -213,14 +217,42 @@ func CreateScanFileAndRunScan(fileDir, fileName, image, versionTag, templateFile
 	return err
 }
 
+type SarifMetadata struct {
+	Ref       string `json:"ref"`
+	CommitSha string `json:"commit_sha"`
+	Sarif     string `json:"sarif"`
+}
+
 func UploadSecurityScanToGithub(fileName, versionTag string) error {
 	cmd := exec.Command("git", "rev-parse", fmt.Sprintf("refs/tags/v%s", versionTag))
-	out, _ := cmd.Output()
-	args := fmt.Sprintf("/usr/local/bin/codeql/codeql github upload-results --sarif=%s --repository=solo-io/gloo --ref=refs/tags/v%s --commit=%s ", fileName, versionTag, string(out))
-	cmd = exec.Command("sudo", strings.Split(args, " ")...)
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		return eris.Wrapf(err, "Error, logs: %s", string(out))
+		return eris.Wrapf(err, "error getting commit sha for tag %s", versionTag)
+	}
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	if githubToken == "" {
+		return fmt.Errorf("no GITHUB_TOKEN environment variable specified")
+	}
+	b, err := ioutil.ReadFile(fileName)
+	var r bytes.Buffer
+	w := gzip.NewWriter(&r)
+	_, err = w.Write(b)
+	if err != nil {
+		return eris.Wrap(err, "error writing gzip file")
+	}
+	w.Close()
+	sarifMetadata := SarifMetadata{
+		Ref:       fmt.Sprintf("refs/tags/v%s", versionTag),
+		CommitSha: strings.TrimSpace(string(out)),
+		Sarif:     base64.StdEncoding.EncodeToString(r.Bytes()),
+	}
+	header := req.Header{
+		"Authorization": fmt.Sprintf("token %s", githubToken),
+		"Content-Type":  "application/json",
+	}
+	_, err = req.Post("https://api.github.com/repos/solo-io/gloo/code-scanning/sarifs", req.BodyJSON(sarifMetadata), header)
+	if err != nil {
+		return eris.Wrap(err, "error uploading sarif file to github")
 	}
 	return nil
 }
