@@ -206,6 +206,10 @@ func CreateScanFileAndRunScan(fileDir, fileName, image, versionTag, templateFile
 	}
 	imageToScan := fmt.Sprintf("%s/%s:%s", imageRepo, image, versionTag)
 	err = RunTrivyScan(imageToScan, versionTag, templateFile, file.Name())
+	if err != nil {
+		return err
+	}
+	err = UploadSecurityScanToGithub(fileName, versionTag)
 	return err
 }
 
