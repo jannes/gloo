@@ -214,8 +214,10 @@ func CreateScanFileAndRunScan(fileDir, fileName, image, versionTag, templateFile
 }
 
 func UploadSecurityScanToGithub(fileName, versionTag string) error {
-	args := fmt.Sprintf("/usr/local/bin/codeql/codeql github upload-results --sarif=%s --repository=solo-io/gloo --ref=refs/tags/v%s --commit=$(git rev-parse tags/refs/v%s) ", fileName, versionTag, versionTag)
-	cmd := exec.Command("sudo", strings.Split(args, " ")...)
+	cmd := exec.Command("git", "rev-parse", fmt.Sprintf("refs/tags/v%s", versionTag))
+	out, _ := cmd.Output()
+	args := fmt.Sprintf("/usr/local/bin/codeql/codeql github upload-results --sarif=%s --repository=solo-io/gloo --ref=refs/tags/v%s --commit=%s ", fileName, versionTag, string(out))
+	cmd = exec.Command("sudo", strings.Split(args, " ")...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return eris.Wrapf(err, "Error, logs: %s", string(out))
