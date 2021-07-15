@@ -40,7 +40,8 @@ jobs:
           sudo dpkg -i trivy_0.18.3_Linux-64bit.deb
           wget -O tmp.zip https://github.com/github/codeql-cli-binaries/releases/download/v2.5.7/codeql-linux64.zip
           unzip tmp.zip
-          sudo mv codeql/codeql /usr/local/bin/codeql
+          sudo mv codeql /usr/local/bin/codeql
+          PATH="/usr/local/bin/codeql:$PATH"
           rm -rf tmp.zip codeql
           codeql
       - name: Set up Go 1.16.3
