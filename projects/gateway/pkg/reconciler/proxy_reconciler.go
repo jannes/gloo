@@ -228,7 +228,12 @@ func transitionFunc(proxiesToWrite GeneratedProxies) gloov1.TransitionProxyFunc 
 			if err := forEachVhost(originalListener, proxiesToWrite[desired], func(vhost *gloov1.VirtualHost, accepted bool) {
 				// old vhost was rejected, preserve it on the desired proxy
 				if !accepted {
-					desiredHttpListener.VirtualHosts = append(desiredHttpListener.VirtualHosts, vhost)
+					if isVhostInList(vhost, desiredHttpListener.VirtualHosts) {
+						// vhost already contained in desiredHttpListener, do nothing
+					} else {
+						desiredHttpListener.VirtualHosts = append(desiredHttpListener.VirtualHosts, vhost)
+					}
+
 				}
 			}); err != nil {
 				// should never happen
@@ -247,4 +252,13 @@ func transitionFunc(proxiesToWrite GeneratedProxies) gloov1.TransitionProxyFunc 
 
 		return utils.TransitionFunction(original, desired)
 	}
+}
+
+func isVhostInList(vhost *gloov1.VirtualHost, list []*gloov1.VirtualHost) bool {
+	for _, item := range list {
+		if vhost.GetName() == item.GetName() {
+			return true
+		}
+	}
+	return false
 }

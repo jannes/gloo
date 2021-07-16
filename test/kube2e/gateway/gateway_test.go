@@ -499,7 +499,7 @@ var _ = Describe("Kube2e: gateway", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				// sanity check that validation is enabled/strict
-				_, err = virtualServiceClient.Write(valid, clients.WriteOpts{})
+				_, err = virtualServiceClient.Write(inValid, clients.WriteOpts{})
 				Expect(err).To(MatchError(ContainSubstring("could not render proxy")))
 
 				// disable strict validation
@@ -529,8 +529,6 @@ var _ = Describe("Kube2e: gateway", func() {
 					return virtualServiceClient.Read(testHelper.InstallNamespace, petstoreName, clients.ReadOpts{})
 				}, "15s", "0.5s")
 
-				_ = kubeClient.CoreV1().Services(testHelper.InstallNamespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
-				_ = kubeClient.AppsV1().Deployments(testHelper.InstallNamespace).Delete(ctx, petstoreName, metav1.DeleteOptions{})
 				// important that we update the always accept setting after removing resources, or else we can have:
 				// "validation is disabled due to an invalid resource which has been written to storage.
 				// Please correct any Rejected resources to re-enable validation."
